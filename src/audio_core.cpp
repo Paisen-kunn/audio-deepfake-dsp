@@ -1,6 +1,7 @@
 #include "audio_core.hpp"
 
 #include <algorithm>
+#include <cctype>
 #include <cmath>
 #include <complex>
 #include <cstdint>
@@ -13,6 +14,16 @@
 #include <sstream>
 #include <stdexcept>
 #include <utility>
+
+#if defined(_WIN32)
+#define NOMINMAX
+#include <mfapi.h>
+#include <mfidl.h>
+#include <mfreadwrite.h>
+#elif defined(__APPLE__)
+#include <AudioToolbox/AudioToolbox.h>
+#include <CoreFoundation/CoreFoundation.h>
+#endif
 
 namespace forensic {
 namespace {
@@ -33,6 +44,13 @@ std::uint32_t read_u32(const unsigned char* data) {
         | (static_cast<std::uint32_t>(data[1]) << 8)
         | (static_cast<std::uint32_t>(data[2]) << 16)
         | (static_cast<std::uint32_t>(data[3]) << 24);
+}
+
+std::string lowercase_extension(const std::filesystem::path& path) {
+    auto extension = path.extension().string();
+    std::transform(extension.begin(), extension.end(), extension.begin(),
+        [](unsigned char character) { return static_cast<char>(std::tolower(character)); });
+    return extension;
 }
 
 void fft(std::array<std::complex<double>, kFftSize>& values) {
@@ -210,10 +228,161 @@ Audio load_wav(const std::filesystem::path& path) {
     return audio;
 }
 
+#if defined(_WIN32)
+Audio load_mp3(const std::filesystem::path& path) {
+    static const HRESULT startup = MFStartup(MF_VERSION);
+    if (FAILED(startup)) throw std::runtime_error("Could not initialize the Windows audio decoder.");
+    IMFSourceReader* reader = nullptr;
+    const auto wide_path = path.wstring();
+    HRESULT result = MFCreateSourceReaderFromURL(wide_path.c_str(), nullptr, &reader);
+    if (FAILED(result)) throw std::runtime_error("Could not open MP3 file: " + path.string());
+    IMFMediaType* type = nullptr;
+    result = MFCreateMediaType(&type);
+    if (SUCCEEDED(result)) result = type->SetGUID(MF_MT_MAJOR_TYPE, MFMediaType_Audio);
+    if (SUCCEEDED(result)) result = type->SetGUID(MF_MT_SUBTYPE, MFAudioFormat_Float);
+    if (SUCCEEDED(result)) result = type->SetUINT32(MF_MT_AUDIO_NUM_CHANNELS, 1);
+    if (SUCCEEDED(result)) result = reader->SetCurrentMediaType(
+        static_cast<DWORD>(MF_SOURCE_READER_FIRST_AUDIO_STREAM), nullptr, type);
+    if (type != nullptr) type->Release();
+    if (FAILED(result)) {
+        reader->Release();
+        throw std::runtime_error("MP3 decoder does not support this file: " + path.string());
+    }
+    IMFMediaType* actual_type = nullptr;
+    UINT32 source_rate = 0;
+    result = reader->GetCurrentMediaType(
+        static_cast<DWORD>(MF_SOURCE_READER_FIRST_AUDIO_STREAM), &actual_type);
+    if (SUCCEEDED(result)) result = actual_type->GetUINT32(
+        MF_MT_AUDIO_SAMPLES_PER_SECOND, &source_rate);
+    if (actual_type != nullptr) actual_type->Release();
+    if (FAILED(result) || source_rate == 0) {
+        reader->Release();
+        throw std::runtime_error("MP3 file has no valid sample rate: " + path.string());
+    }
+    std::vector<double> samples;
+    while (true) {
+        DWORD flags = 0;
+        IMFSample* sample = nullptr;
+        result = reader->ReadSample(static_cast<DWORD>(MF_SOURCE_READER_FIRST_AUDIO_STREAM), 0, nullptr,
+            &flags, nullptr, &sample);
+        if (FAILED(result)) {
+            if (sample != nullptr) sample->Release();
+            reader->Release();
+            throw std::runtime_error("Could not decode MP3 file: " + path.string());
+        }
+        if ((flags & MF_SOURCE_READERF_ENDOFSTREAM) != 0) {
+            if (sample != nullptr) sample->Release();
+            break;
+        }
+        if (sample == nullptr) continue;
+        IMFMediaBuffer* buffer = nullptr;
+        result = sample->ConvertToContiguousBuffer(&buffer);
+        if (SUCCEEDED(result)) {
+            BYTE* data = nullptr;
+            DWORD length = 0;
+            result = buffer->Lock(&data, nullptr, &length);
+            if (SUCCEEDED(result)) {
+                const auto* decoded = reinterpret_cast<const float*>(data);
+                samples.insert(samples.end(), decoded, decoded + length / sizeof(float));
+                buffer->Unlock();
+            }
+            buffer->Release();
+        }
+        sample->Release();
+        if (FAILED(result)) {
+            reader->Release();
+            throw std::runtime_error("Could not read decoded MP3 samples: " + path.string());
+        }
+    }
+    reader->Release();
+    if (samples.empty()) throw std::runtime_error("MP3 contains no audio frames: " + path.string());
+    const auto resampled = resample_linear(samples, static_cast<int>(source_rate), kSampleRate);
+    Audio audio;
+    audio.sample_rate = kSampleRate;
+    audio.source_sample_rate = static_cast<int>(source_rate);
+    audio.channels = 1;
+    audio.samples.reserve(resampled.size());
+    for (const auto sample : resampled) audio.samples.push_back(static_cast<float>(sample));
+    audio.path = path;
+    return audio;
+}
+#elif defined(__APPLE__)
+Audio load_mp3(const std::filesystem::path& path) {
+    const auto path_string = path.string();
+    CFURLRef url = CFURLCreateFromFileSystemRepresentation(nullptr,
+        reinterpret_cast<const UInt8*>(path_string.c_str()), path_string.size(), false);
+    ExtAudioFileRef file = nullptr;
+    const OSStatus open_status = url == nullptr ? -1 : ExtAudioFileOpenURL(url, &file);
+    if (url != nullptr) CFRelease(url);
+    if (open_status != noErr || file == nullptr) {
+        throw std::runtime_error("Could not open MP3 file: " + path_string);
+    }
+    AudioStreamBasicDescription source{};
+    UInt32 size = sizeof(source);
+    OSStatus status = ExtAudioFileGetProperty(file, kExtAudioFileProperty_FileDataFormat,
+        &size, &source);
+    if (status != noErr || source.mSampleRate <= 0 || source.mChannelsPerFrame == 0) {
+        ExtAudioFileDispose(file);
+        throw std::runtime_error("MP3 file has no valid audio format: " + path_string);
+    }
+    AudioStreamBasicDescription client{};
+    client.mSampleRate = source.mSampleRate;
+    client.mFormatID = kAudioFormatLinearPCM;
+    client.mFormatFlags = kAudioFormatFlagsNativeFloatPacked;
+    client.mBytesPerPacket = sizeof(float);
+    client.mFramesPerPacket = 1;
+    client.mBytesPerFrame = sizeof(float);
+    client.mChannelsPerFrame = 1;
+    client.mBitsPerChannel = sizeof(float) * 8;
+    status = ExtAudioFileSetProperty(file, kExtAudioFileProperty_ClientDataFormat,
+        sizeof(client), &client);
+    if (status != noErr) {
+        ExtAudioFileDispose(file);
+        throw std::runtime_error("MP3 decoder does not support this file: " + path_string);
+    }
+    std::vector<float> decoded;
+    std::array<float, 4096> buffer{};
+    while (true) {
+        UInt32 frames = static_cast<UInt32>(buffer.size());
+        AudioBufferList list{};
+        list.mNumberBuffers = 1;
+        list.mBuffers[0].mNumberChannels = 1;
+        list.mBuffers[0].mDataByteSize = sizeof(buffer);
+        list.mBuffers[0].mData = buffer.data();
+        status = ExtAudioFileRead(file, &frames, &list);
+        if (status != noErr) {
+            ExtAudioFileDispose(file);
+            throw std::runtime_error("Could not decode MP3 file: " + path_string);
+        }
+        decoded.insert(decoded.end(), buffer.begin(), buffer.begin() + frames);
+        if (frames == 0) break;
+    }
+    ExtAudioFileDispose(file);
+    if (decoded.empty()) throw std::runtime_error("MP3 contains no audio frames: " + path_string);
+    std::vector<double> samples(decoded.begin(), decoded.end());
+    const auto resampled = resample_linear(samples, static_cast<int>(source.mSampleRate), kSampleRate);
+    Audio audio;
+    audio.sample_rate = kSampleRate;
+    audio.source_sample_rate = static_cast<int>(source.mSampleRate);
+    audio.channels = static_cast<int>(source.mChannelsPerFrame);
+    audio.samples.assign(resampled.begin(), resampled.end());
+    audio.path = path;
+    return audio;
+}
+#endif
+
+Audio load_audio(const std::filesystem::path& path) {
+    const auto extension = lowercase_extension(path);
+    if (extension == ".wav") return load_wav(path);
+    if (extension == ".mp3") return load_mp3(path);
+    throw std::runtime_error("Unsupported audio format: " + path.string());
+}
+
 std::vector<Audio> load_dataset(const std::filesystem::path& dataset_root) {
     std::vector<Audio> result;
     for (const auto& item : std::filesystem::recursive_directory_iterator(dataset_root)) {
-        if (!item.is_regular_file() || item.path().extension() != ".wav") {
+        const auto extension = lowercase_extension(item.path());
+        if (!item.is_regular_file() || (extension != ".wav" && extension != ".mp3")) {
             continue;
         }
         const auto relative = item.path().lexically_relative(dataset_root);
@@ -222,7 +391,7 @@ std::vector<Audio> load_dataset(const std::filesystem::path& dataset_root) {
         if (class_directory != "real" && class_directory != "synthetic") {
             continue;
         }
-        auto audio = load_wav(item.path());
+        auto audio = load_audio(item.path());
         audio.label = class_directory == "real" ? Label::Real : Label::Synthetic;
         result.push_back(std::move(audio));
     }

@@ -12,6 +12,18 @@ int main(int argc, char** argv) {
         if (argc != 2) {
             throw std::runtime_error("Expected the bundled demo dataset path.");
         }
+        bool mixed_case_mp3_dispatched = false;
+        try {
+            forensic::load_audio("missing.Mp3");
+        } catch (const std::runtime_error& error) {
+            if (std::string(error.what()).find("Unsupported audio format") != std::string::npos) {
+                throw std::runtime_error("Mixed-case MP3 extension was not dispatched.");
+            }
+            mixed_case_mp3_dispatched = true;
+        }
+        if (!mixed_case_mp3_dispatched) {
+            throw std::runtime_error("Missing MP3 fixture unexpectedly decoded.");
+        }
         const auto samples = forensic::load_dataset(argv[1]);
         if (samples.size() != 24) {
             throw std::runtime_error("Expected exactly 24 bundled sample recordings.");

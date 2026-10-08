@@ -64,6 +64,7 @@ struct Prediction {
 
 std::vector<Audio> load_dataset(const std::filesystem::path& dataset_root);
 Audio load_wav(const std::filesystem::path& path);
+Audio load_audio(const std::filesystem::path& path);
 Analysis analyze(const Audio& audio);
 
 class RandomForest {

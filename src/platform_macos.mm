@@ -200,7 +200,7 @@ NSColor* color_for_db(float db) {
     [content addSubview:self.samplePicker];
     [content addSubview:make_button(@"ANALYZE SAMPLE", NSMakeRect(365, 102, 145, 30),
                                     self, @selector(analyzeSelectedSample:))];
-    [content addSubview:make_button(@"OPEN WAV…", NSMakeRect(520, 102, 120, 30),
+    [content addSubview:make_button(@"OPEN AUDIO…", NSMakeRect(520, 102, 120, 30),
                                     self, @selector(openAudio:))];
     [content addSubview:make_button(@"PLAY", NSMakeRect(650, 102, 80, 30),
                                     self, @selector(playAudio:))];
@@ -323,11 +323,11 @@ NSColor* color_for_db(float db) {
     (void)sender;
     const NSInteger index = self.samplePicker.indexOfSelectedItem;
     if (index < 0 || static_cast<std::size_t>(index) >= g_samples.size()) {
-        self.statusLabel.stringValue = @"Choose a bundled sample or open a WAV file.";
+        self.statusLabel.stringValue = @"Choose a bundled sample or open a WAV or MP3 file.";
         return;
     }
     try {
-        auto sample = forensic::load_wav(g_samples[static_cast<std::size_t>(index)].path);
+        auto sample = forensic::load_audio(g_samples[static_cast<std::size_t>(index)].path);
         sample.label = g_samples[static_cast<std::size_t>(index)].label;
         [self analyzeAudio:std::move(sample)];
     } catch (const std::exception& exception) {
@@ -338,13 +338,14 @@ NSColor* color_for_db(float db) {
 - (void)openAudio:(id)sender {
     (void)sender;
     NSOpenPanel* panel = [NSOpenPanel openPanel];
-    panel.allowedContentTypes = @[[UTType typeWithFilenameExtension:@"wav"]];
+    panel.allowedContentTypes = @[[UTType typeWithFilenameExtension:@"wav"],
+        [UTType typeWithFilenameExtension:@"mp3"]];
     panel.allowsMultipleSelection = NO;
     if ([panel runModal] != NSModalResponseOK || panel.URL == nil) {
         return;
     }
     try {
-        auto audio = forensic::load_wav(panel.URL.fileSystemRepresentation);
+        auto audio = forensic::load_audio(panel.URL.fileSystemRepresentation);
         [self analyzeAudio:std::move(audio)];
     } catch (const std::exception& exception) {
         self.statusLabel.stringValue = ns_string(exception.what());

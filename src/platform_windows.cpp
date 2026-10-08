@@ -1,8 +1,10 @@
 #define UNICODE
 #define _UNICODE
+#define NOMINMAX
 #include <windows.h>
 #include <commdlg.h>
 #include <mmsystem.h>
+
 
 #include "audio_core.hpp"
 
@@ -110,11 +112,11 @@ void update_analysis(forensic::Audio audio) {
 void analyze_selected() {
     const int index = static_cast<int>(SendMessageW(g_picker, CB_GETCURSEL, 0, 0));
     if (index < 0 || static_cast<std::size_t>(index) >= g_samples.size()) {
-        set_status("Choose a bundled sample or open a WAV file.");
+        set_status("Choose a bundled sample or open a WAV or MP3 file.");
         return;
     }
     try {
-        auto sample = forensic::load_wav(g_samples[static_cast<std::size_t>(index)].path);
+        auto sample = forensic::load_audio(g_samples[static_cast<std::size_t>(index)].path);
         sample.label = g_samples[static_cast<std::size_t>(index)].label;
         update_analysis(std::move(sample));
     } catch (const std::exception& error) {
@@ -127,7 +129,7 @@ void open_audio_file() {
     OPENFILENAMEW dialog{};
     dialog.lStructSize = sizeof(dialog);
     dialog.hwndOwner = g_window;
-    dialog.lpstrFilter = L"PCM WAV audio (*.wav)\0*.wav\0All files (*.*)\0*.*\0";
+    dialog.lpstrFilter = L"Audio files (*.wav;*.mp3)\0*.wav;*.mp3\0All files (*.*)\0*.*\0";
     dialog.lpstrFile = file;
     dialog.nMaxFile = MAX_PATH;
     dialog.Flags = OFN_FILEMUSTEXIST | OFN_PATHMUSTEXIST | OFN_NOCHANGEDIR;
@@ -136,7 +138,7 @@ void open_audio_file() {
         return;
     }
     try {
-        update_analysis(forensic::load_wav(file));
+        update_analysis(forensic::load_audio(file));
     } catch (const std::exception& error) {
         set_status(error.what());
     }
@@ -236,13 +238,13 @@ LRESULT CALLBACK window_proc(HWND window, UINT message, WPARAM wparam, LPARAM lp
     switch (message) {
     case WM_CREATE: {
         g_window = window;
-        g_picker = create_control(WS_EX_CLIENTEDGE, WC_COMBOBOXW, L"",
+        g_picker = create_control(WS_EX_CLIENTEDGE, L"COMBOBOX", L"",
             WS_CHILD | WS_VISIBLE | WS_VSCROLL | CBS_DROPDOWNLIST | WS_TABSTOP,
             24, 89, 415, 300, kPickerId);
         HWND analyze = create_control(0, L"BUTTON", L"ANALYZE SAMPLE",
             WS_CHILD | WS_VISIBLE | BS_PUSHBUTTON | WS_TABSTOP,
             452, 89, 140, 30, kAnalyzeId);
-        HWND open = create_control(0, L"BUTTON", L"OPEN WAV...",
+        HWND open = create_control(0, L"BUTTON", L"OPEN AUDIO...",
             WS_CHILD | WS_VISIBLE | BS_PUSHBUTTON | WS_TABSTOP,
             602, 89, 115, 30, kOpenId);
         HWND play = create_control(0, L"BUTTON", L"PLAY",
@@ -290,7 +292,21 @@ LRESULT CALLBACK window_proc(HWND window, UINT message, WPARAM wparam, LPARAM lp
             return 0;
         case kPlayId:
             if (!g_current.path.empty()) {
-                if (PlaySoundW(g_current.path.c_str(), nullptr, SND_FILENAME | SND_ASYNC)) {
+                const auto extension = g_current.path.extension().wstring();
+                if (extension == L".mp3" || extension == L".MP3") {
+                    mciSendStringW(L"close audio_forensics_mp3", nullptr, 0, g_window);
+                    const std::wstring open_command = L"open \""
+                        + g_current.path.wstring() + L"\" type mpegvideo alias audio_forensics_mp3";
+                    const bool opened = mciSendStringW(open_command.c_str(), nullptr, 0, g_window) == 0;
+                    const bool playing = opened && mciSendStringW(
+                        L"play audio_forensics_mp3", nullptr, 0, g_window) == 0;
+                    if (playing) {
+                        set_status("Playing selected recording...");
+                    } else {
+                        mciSendStringW(L"close audio_forensics_mp3", nullptr, 0, g_window);
+                        set_status("Playback could not start. Check the Windows output device/volume.");
+                    }
+                } else if (PlaySoundW(g_current.path.c_str(), nullptr, SND_FILENAME | SND_ASYNC)) {
                     set_status("Playing selected recording...");
                 } else {
                     set_status("Playback could not start. Check the Windows output device/volume.");
@@ -312,6 +328,7 @@ LRESULT CALLBACK window_proc(HWND window, UINT message, WPARAM wparam, LPARAM lp
     }
     case WM_DESTROY:
         PlaySoundW(nullptr, nullptr, 0);
+        mciSendStringW(L"close audio_forensics_mp3", nullptr, 0, g_window);
         PostQuitMessage(0);
         return 0;
     default:

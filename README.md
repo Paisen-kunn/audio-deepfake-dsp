@@ -25,14 +25,14 @@ open build/audio_forensics.app
 
 No internet connection is needed to build or run this app from the included source/data after the local C++ toolchain is installed. Keep the `.app` bundle intact; its `Contents/MacOS/data` folder contains the example audio.
 
-The native user interface uses Win32 on Windows and Cocoa on macOS. The DSP/classifier engine is shared C++17. Upload/open currently supports PCM WAV files (8/16/24/32-bit integer or 32-bit float); the bundled examples are WAV so FLAC decoder dependencies are not needed.
+The native user interface uses Win32 on Windows and Cocoa on macOS. The DSP/classifier engine is shared C++17. Upload/open supports PCM WAV files (8/16/24/32-bit integer or 32-bit float) and MP3 files through the native Windows Media Foundation or macOS AudioToolbox decoder. The bundled examples are WAV.
 
 ## Use the GUI
 
 - Choose any bundled `REAL` or `AI-GENERATED` sample from the dropdown.
 - Click **Analyze Sample** to display/play the signal analysis.
-- Click **Open WAV** to examine another local recording.
-- Click **Play** to listen to the selected WAV.
+- Click **Open Audio** to examine another local WAV or MP3 recording.
+- Click **Play** to listen to the selected recording.
 - Read the waveform, STFT spectrogram, 15-feature table, demo classifier output, and hold-out metrics.
 
 ## DSP details
